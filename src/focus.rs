@@ -49,33 +49,69 @@ pub(crate) fn test_notification(herdr_bin: &str) -> FocusNotification {
     }
 }
 
-/// Herdr 0.9.0 agent.focus selects the server pane without switching client
-/// tabs. Explicit tab.focus projects that selection into the attached clients.
-pub(crate) fn focus_pane(pane_id: &str, herdr_bin: &str) -> Result<(), String> {
-    let output = Command::new(herdr_bin)
-        .args(["agent", "focus", pane_id])
-        .output()
-        .map_err(|err| format!("failed to focus agent: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "failed to focus agent: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+/// Activates the workspace's bound terminal and focuses the target agent.
+///
+/// Without a terminal binding there is no visible app to activate, so a
+/// notification click is intentionally a no-op. A binding is checked again
+/// here at click time because generated notification scripts can outlive the
+/// state that existed when they were written.
+pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
+    let workspace = crate::util::workspace_id_from_pane_id(pane_id).unwrap_or("default");
+    let Some(bound_terminal) = crate::state::remembered_terminal(workspace) else {
+        return Ok(());
+    };
+    let herdr_bin = crate::executable::resolve_herdr_bin()?;
+
+    crate::state::mark_focus_origin(workspace)
+        .map_err(|err| format!("failed to mark notification focus: {err}"))?;
+    let result = (|| -> Result<(), String> {
+        activate_terminal(&bound_terminal)?;
+
+        let output = Command::new(&herdr_bin)
+            .args(["agent", "focus", pane_id])
+            .output()
+            .map_err(|err| format!("failed to focus agent: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to focus agent: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|err| format!("invalid agent focus json: {err}"))?;
+        let tab_id = response
+            .pointer("/result/agent/tab_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or("agent focus response is missing tab_id")?;
+        let output = Command::new(&herdr_bin)
+            .args(["tab", "focus", tab_id])
+            .output()
+            .map_err(|err| format!("failed to focus tab: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to focus tab: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = crate::state::clear_focus_origin(workspace);
     }
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("invalid agent focus json: {err}"))?;
-    let tab_id = response
-        .pointer("/result/agent/tab_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .ok_or("agent focus response is missing tab_id")?;
-    let output = Command::new(herdr_bin)
-        .args(["tab", "focus", tab_id])
+
+    result
+}
+
+fn activate_terminal(bundle_id: &str) -> Result<(), String> {
+    let output = Command::new("open")
+        .args(["-b", bundle_id])
         .output()
-        .map_err(|err| format!("failed to focus tab: {err}"))?;
+        .map_err(|err| format!("failed to activate terminal {bundle_id}: {err}"))?;
     if !output.status.success() {
         return Err(format!(
-            "failed to focus tab: {}",
+            "failed to activate terminal {bundle_id}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -107,17 +143,23 @@ pub(crate) fn should_clear_notification_on_focus(workspace: &str) -> bool {
 
 /// Learns the currently frontmost app as the terminal bound to `workspace`.
 ///
-/// No whitelist: a `pane.focused` event only fires while the user is
-/// operating Herdr inside a terminal, so the frontmost app is trusted to be
-/// that terminal. The one spoofable path is a `pane.focused` produced by
-/// `herdr agent focus` after a notification click (frontmost is then the
-/// browser or notification app); that mis-binding is bounded to this
-/// workspace and corrected on the next genuine focus. Best-effort: a failure
-/// must never break the pane.focused handling.
+/// A focus event produced by a notification click must not overwrite the
+/// workspace binding with the browser or notification app that was frontmost
+/// when the click happened. Obvious non-terminal apps are also rejected as a
+/// defense in depth, while unknown apps remain eligible so real terminals and
+/// IDEs with integrated terminals still work without configuration.
 pub(crate) fn learn_terminal_from_frontmost(workspace: &str) -> Option<String> {
+    let existing = crate::state::remembered_terminal(workspace);
+    if crate::state::focus_origin_is_active(workspace) {
+        return existing;
+    }
+
     let frontmost = frontmost_bundle_id()?;
+    if crate::state::is_obvious_non_terminal_bundle(&frontmost) {
+        return existing;
+    }
     // Skip the write when the workspace is already bound to this app.
-    if crate::state::remembered_terminal(workspace).as_deref() == Some(frontmost.as_str()) {
+    if existing.as_deref() == Some(frontmost.as_str()) {
         return Some(frontmost);
     }
     crate::state::remember_terminal(workspace, &frontmost).ok()?;

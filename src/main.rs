@@ -20,10 +20,10 @@ use focus::{
     test_notification, NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
-use script::write_focus_script;
+use script::{rewrite_generated_scripts_without_activation, write_focus_script};
 use state::{
-    cleanup_stale_state_files, mark_notification_cleared, prune_stale_workspace_bindings,
-    reset_notification_clearance,
+    cleanup_stale_state_files, clear_terminal_bindings, mark_notification_cleared,
+    prune_stale_workspace_bindings, reset_notification_clearance,
 };
 
 fn main() -> ExitCode {
@@ -51,6 +51,8 @@ fn run() -> Result<(), String> {
         CliAction::Cleanup => {
             cleanup_stale_state_files()
                 .map_err(|err| format!("failed to clean stale state files: {err}"))?;
+            rewrite_generated_scripts_without_activation()
+                .map_err(|err| format!("failed to update generated focus scripts: {err}"))?;
             // Terminal bindings for workspaces that no longer exist are stale
             // too; best-effort, since Herdr may not be reachable.
             if let Ok(herdr_bin) = resolve_herdr_bin() {
@@ -58,8 +60,15 @@ fn run() -> Result<(), String> {
             }
             return Ok(());
         }
+        CliAction::ClearTerminalBindings => {
+            clear_terminal_bindings()
+                .map_err(|err| format!("failed to clear terminal bindings: {err}"))?;
+            rewrite_generated_scripts_without_activation()
+                .map_err(|err| format!("failed to update generated focus scripts: {err}"))?;
+            return Ok(());
+        }
         CliAction::FocusPane(pane_id) => {
-            return focus::focus_pane(&pane_id, &resolve_herdr_bin()?);
+            return focus::focus_pane(&pane_id);
         }
         CliAction::CheckPaneVisibility(pane_id) => {
             let herdr_bin = resolve_herdr_bin()?;
@@ -86,12 +95,9 @@ fn run() -> Result<(), String> {
                 };
 
                 // Zero-configuration terminal detection: bind the frontmost
-                // app to this pane's workspace, so future clicks can activate
-                // it and skip checks can match it. Trusted without a whitelist
-                // because a genuine pane.focused only fires while the user is
-                // inside Herdr; a click-spawned focus (frontmost = browser)
-                // gets corrected by the next genuine focus. Best-effort, so
-                // it never hijacks the pane.focused handling.
+                // terminal to this pane's workspace. learn_terminal_from_frontmost
+                // ignores notification-originated focus events and obvious
+                // non-terminal apps, while keeping this event path best-effort.
                 let workspace = util::workspace_id_from_pane_id(&pane_id).unwrap_or("default");
                 learn_terminal_from_frontmost(workspace);
 
@@ -114,6 +120,7 @@ fn run() -> Result<(), String> {
         CliAction::Help
         | CliAction::Version
         | CliAction::Cleanup
+        | CliAction::ClearTerminalBindings
         | CliAction::CheckPaneVisibility(_)
         | CliAction::FocusPane(_) => {
             unreachable!("handled before notification setup")

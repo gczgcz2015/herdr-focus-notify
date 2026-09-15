@@ -28,6 +28,7 @@ pub(crate) fn write_focus_script(
     // State cleanup is maintenance work; a stale file must not prevent a new
     // notification from being delivered.
     let _ = cleanup_stale_state_files();
+    let _ = rewrite_generated_scripts_without_activation();
     let _ = prune_stale_workspace_bindings(herdr_bin);
 
     let timeout_secs = if test_mode {
@@ -79,7 +80,6 @@ fn focus_script_content_with_timeout(
         herdr_bin,
         notifier_bin,
         timeout_secs,
-        activation_command(workspace).as_deref(),
         visibility_check_binary,
         focus_binary,
     )
@@ -98,7 +98,6 @@ fn alerter_focus_script(
     herdr_bin: &str,
     notifier_bin: &str,
     timeout_secs: u64,
-    activate_command: Option<&str>,
     visibility_check_binary: Option<&Path>,
     focus_binary: &Path,
 ) -> String {
@@ -170,8 +169,7 @@ fn alerter_focus_script(
     script.push_str("fi\n");
     script.push_str("case \"$result\" in\n");
     script.push_str(&format!(
-        "  Focus|@ACTIONCLICKED|@CONTENTCLICKED)\n{activate}    HERDR_BIN_PATH={herdr} exec {focus_binary} --focus-pane {pane}\n    ;;\n",
-        activate = activation_script(activate_command),
+        "  Focus|@ACTIONCLICKED|@CONTENTCLICKED)\n    HERDR_BIN_PATH={herdr} exec {focus_binary} --focus-pane {pane}\n    ;;\n",
         herdr = herdr_q,
         focus_binary = focus_binary_q,
         pane = pane_q,
@@ -181,20 +179,51 @@ fn alerter_focus_script(
     script
 }
 
-fn activation_script(activate_command: Option<&str>) -> String {
-    let Some(command) = activate_command else {
-        return String::new();
+/// Removes the activation command captured by scripts generated before
+/// terminal activation moved into `--focus-pane`. This lets the clear-bindings
+/// action make already-visible notifications safe to click as well.
+pub(crate) fn rewrite_generated_scripts_without_activation() -> io::Result<()> {
+    let state_dir = plugin_state_dir();
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
     };
-    format!("    {command} >/dev/null 2>&1\n", command = command)
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("focus-") || !name.ends_with(".sh") || !path.is_file() {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let rewritten = without_captured_activation(&content);
+        if rewritten != content {
+            let _ = fs::write(path, rewritten);
+        }
+    }
+
+    Ok(())
 }
 
-/// The command that brings the terminal/Herdr host app to the front before
-/// focusing the agent pane: whichever terminal is bound to the pane's
-/// workspace, learned from `pane.focused` events. Zero configuration, and it
-/// follows the user across terminals per-workspace.
-fn activation_command(workspace: &str) -> Option<String> {
-    crate::state::remembered_terminal(workspace)
-        .map(|bound| format!("open -b {}", shell_quote(&bound)))
+fn without_captured_activation(content: &str) -> String {
+    let mut rewritten = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("open -b "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    rewritten
 }
 
 #[cfg(unix)]
@@ -263,7 +292,6 @@ mod tests {
             "/opt/homebrew/bin/alerter",
             120,
             None,
-            None,
             Path::new("/tmp/herdr-focus-notify"),
         );
 
@@ -277,7 +305,6 @@ mod tests {
             "/usr/local/bin/herdr",
             "/opt/homebrew/bin/alerter",
             0,
-            None,
             None,
             Path::new("/tmp/herdr-focus-notify"),
         );
@@ -293,18 +320,17 @@ mod tests {
     }
 
     #[test]
-    fn alerter_script_includes_activation_when_configured() {
+    fn alerter_script_defers_activation_to_focus_helper() {
         let script = alerter_focus_script(
             &sample_notification(),
             "/usr/local/bin/herdr",
             "/opt/homebrew/bin/alerter",
             3600,
-            Some("open -a 'kitty'"),
             None,
             Path::new("/tmp/herdr-focus-notify"),
         );
 
-        assert!(script.contains("open -a 'kitty' >/dev/null 2>&1"));
+        assert!(!script.contains("open -b "));
         assert!(script.contains("HERDR_BIN_PATH='/usr/local/bin/herdr' exec '/tmp/herdr-focus-notify' --focus-pane 'w1:p3'"));
     }
 
@@ -315,7 +341,6 @@ mod tests {
             "/usr/local/bin/herdr",
             "/opt/homebrew/bin/alerter",
             3600,
-            Some("open -a 'kitty'"),
             Some(Path::new("/tmp/herdr-focus-notify")),
             Path::new("/tmp/herdr-focus-notify"),
         );
@@ -330,5 +355,14 @@ mod tests {
                 < script.find("while kill -0 \"$notifier_pid\"").unwrap()
         );
         assert!(script.contains("kill \"$monitor_pid\" 2>/dev/null"));
+    }
+
+    #[test]
+    fn removes_old_captured_activation_commands() {
+        let old = "#!/bin/sh\n    open -b 'com.google.Chrome' >/dev/null 2>&1\n    exec focus\n";
+        assert_eq!(
+            without_captured_activation(old),
+            "#!/bin/sh\n    exec focus\n"
+        );
     }
 }

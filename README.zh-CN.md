@@ -43,7 +43,7 @@ herdr plugin link .
 
 ### 3. 完成——零配置
 
-插件**零配置开箱即用**。当你第一次在 Herdr 中聚焦 pane 时,插件会把当时最前面的终端绑定到该 pane 所在的 workspace,之后用它来在点击通知时激活终端、判断你是否正在查看对应 pane。每个 workspace 独立绑定——你在 kitty 里用完,换到 Ghostty 继续同一个 pane,点击通知就会激活 Ghostty。
+插件**零配置开箱即用**。当你第一次在 Herdr 中聚焦 pane 时,插件会把当时最前面的终端绑定到该 pane 所在的 workspace,之后用它来在点击通知时激活终端、判断你是否正在查看对应 pane。每个 workspace 独立绑定——你在 kitty 里用完,换到 Ghostty 继续同一个 pane,点击通知就会激活 Ghostty。点击通知时，即使浏览器或其它 App 在前台，也不会改变已有绑定。
 
 你不需要创建任何配置文件。唯一的外部依赖是通知程序 `alerter`,插件会从 `PATH` 和常见 Homebrew 路径自动查找:
 
@@ -63,7 +63,7 @@ brew install vjeantet/tap/alerter
 | 该 workspace 绑定的终端在前台，且焦点就是对应 pane | 跳过（你正在看 Herdr） |
 | 无法确定前台 App | 发送，避免遗漏状态变化 |
 
-点击通知后,插件会激活该 pane 所在 workspace 绑定的终端,然后执行 `herdr agent focus <pane>`,并使用返回的 tab ID 执行 `herdr tab focus <tab_id>`。后一步让 Herdr 0.9.0 客户端显示选中的 pane；多个客户端连接同一服务端时,会一起切换到该标签页。
+点击通知后,如果该 workspace 已有终端绑定,插件会激活该终端,然后执行 `herdr agent focus <pane>`,并使用返回的 tab ID 执行 `herdr tab focus <tab_id>`。后一步让 Herdr 0.9.0 客户端显示选中的 pane；多个客户端连接同一服务端时,会一起切换到该标签页。如果 workspace 没有绑定,点击不会激活 App,也不会执行 Herdr focus；请先在预期终端中手动聚焦一次 pane。
 
 `blocked` 通知会提示 Agent 需要你的输入，并引导你查看和回复；`done` 通知会提示 Agent 已完成，并引导你查看结果。插件不会读取或总结 pane 内容。
 
@@ -82,7 +82,8 @@ brew install vjeantet/tap/alerter
 | 问题 | 检查方式 |
 |---|---|
 | 没有收到通知 | 确认 `alerter` 已安装且可执行;插件从 `PATH` 和常见 Homebrew 路径自动查找(`brew install vjeantet/tap/alerter`)。 |
-| 点击后没有激活预期终端 | 先在 Herdr 中手动聚焦一次该 pane——插件从那一刻起按 workspace 学习终端。 |
+| 点击后没有激活预期终端 | 使用插件的“清除已保存终端绑定” action,然后在预期终端中手动聚焦一次 pane。 |
+| workspace 保存了错误的终端绑定 | 使用插件的“清除已保存终端绑定” action,然后在预期终端中手动聚焦一次 pane。 |
 | 正在看 Herdr 时仍收到通知 | 说明那一刻你不在该 workspace 绑定的终端里;插件优先保证不错过状态变化。 |
 | 需要诊断信息 | 运行 `--test` 或 `--check-pane-visibility <pane_id>` 直接验证通知链路和聚焦判断。 |
 
