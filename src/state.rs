@@ -8,6 +8,7 @@ use crate::util::notification_group_id;
 
 const GENERATED_SCRIPT_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const TEMP_FILE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const FOCUS_ORIGIN_RETENTION: Duration = Duration::from_secs(15);
 
 pub(crate) fn plugin_state_dir() -> PathBuf {
     env::var_os("HERDR_PLUGIN_STATE_DIR")
@@ -25,11 +26,84 @@ pub(crate) fn remember_terminal(workspace: &str, bundle_id: &str) -> io::Result<
 }
 
 /// The terminal bound to a pane's workspace, learned from `pane.focused`
-/// events. `None` until the workspace has been focused at least once.
+/// events. `None` until the workspace has been focused at least once or when
+/// the saved bundle id is an obvious non-terminal app.
 pub(crate) fn remembered_terminal(workspace: &str) -> Option<String> {
     read_terminal_bindings_from(&terminal_memory_path())?
         .get(workspace)
+        .filter(|bundle_id| !is_obvious_non_terminal_bundle(bundle_id))
         .cloned()
+}
+
+/// Clears all saved workspace-to-terminal bindings.
+pub(crate) fn clear_terminal_bindings() -> io::Result<()> {
+    let binding_result = match fs::remove_file(terminal_memory_path()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    };
+    binding_result?;
+    clear_focus_origin_markers()
+}
+
+/// Marks a focus operation as originating from a notification click. The
+/// marker is intentionally short-lived because Herdr delivers the resulting
+/// focus event in a separate plugin process.
+pub(crate) fn mark_focus_origin(workspace: &str) -> io::Result<()> {
+    let state_dir = plugin_state_dir();
+    fs::create_dir_all(&state_dir)?;
+    fs::write(focus_origin_marker_path(workspace), [])
+}
+
+/// Returns whether a recent notification-originated focus operation is still
+/// suppressing terminal learning for this workspace.
+pub(crate) fn focus_origin_is_active(workspace: &str) -> bool {
+    let path = focus_origin_marker_path(workspace);
+    let active = fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age < FOCUS_ORIGIN_RETENTION);
+
+    if !active {
+        let _ = fs::remove_file(path);
+    }
+    active
+}
+
+pub(crate) fn clear_focus_origin(workspace: &str) -> io::Result<()> {
+    match fs::remove_file(focus_origin_marker_path(workspace)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn focus_origin_marker_path(workspace: &str) -> PathBuf {
+    plugin_state_dir().join(format!(
+        "focus-origin-{}.marker",
+        crate::util::sanitize_group_id(workspace)
+    ))
+}
+
+fn clear_focus_origin_markers() -> io::Result<()> {
+    let state_dir = plugin_state_dir();
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    for entry in entries {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("focus-origin-") && name.ends_with(".marker") && path.is_file() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes bindings for workspaces that no longer exist in Herdr.
@@ -104,6 +178,20 @@ fn terminal_memory_path() -> PathBuf {
     plugin_state_dir().join("terminal-memory.json")
 }
 
+pub(crate) fn is_obvious_non_terminal_bundle(bundle_id: &str) -> bool {
+    matches!(
+        bundle_id,
+        "com.google.Chrome"
+            | "com.apple.Safari"
+            | "org.mozilla.firefox"
+            | "com.microsoft.edgemac"
+            | "company.thebrowser.Browser"
+            | "com.brave.Browser"
+            | "com.apple.finder"
+            | "com.apple.notificationcenterui"
+    )
+}
+
 pub(crate) fn mark_notification_cleared(pane_id: &str) -> io::Result<()> {
     let state_dir = plugin_state_dir();
     fs::create_dir_all(&state_dir)?;
@@ -128,6 +216,7 @@ pub(crate) fn cleanup_stale_state_files() -> io::Result<()> {
         SystemTime::now(),
         GENERATED_SCRIPT_RETENTION,
         TEMP_FILE_RETENTION,
+        FOCUS_ORIGIN_RETENTION,
     )
 }
 
@@ -140,9 +229,12 @@ fn retention_for(
     name: &str,
     script_retention: Duration,
     temp_file_retention: Duration,
+    focus_origin_retention: Duration,
 ) -> Option<Duration> {
     if name.starts_with("focus-") && name.ends_with(".sh") {
         Some(script_retention)
+    } else if name.starts_with("focus-origin-") && name.ends_with(".marker") {
+        Some(focus_origin_retention)
     } else if name.contains(".result.") || name.contains(".status.") || name.ends_with(".cleared") {
         Some(temp_file_retention)
     } else {
@@ -155,6 +247,7 @@ fn cleanup_stale_state_files_in(
     now: SystemTime,
     script_retention: Duration,
     temp_file_retention: Duration,
+    focus_origin_retention: Duration,
 ) -> io::Result<()> {
     let entries = match fs::read_dir(state_dir) {
         Ok(entries) => entries,
@@ -169,7 +262,12 @@ fn cleanup_stale_state_files_in(
             continue;
         };
 
-        let Some(retention) = retention_for(name, script_retention, temp_file_retention) else {
+        let Some(retention) = retention_for(
+            name,
+            script_retention,
+            temp_file_retention,
+            focus_origin_retention,
+        ) else {
             continue;
         };
         if !path.is_file() {
@@ -210,15 +308,23 @@ mod tests {
         fs::write(dir.join("herdr-w1-p1.result.123456"), "old").unwrap();
         fs::write(dir.join("herdr-w1-p1.status.123456"), "old").unwrap();
         fs::write(dir.join("herdr-w1-p1.cleared"), "old").unwrap();
+        fs::write(dir.join("focus-origin-w1.marker"), "old").unwrap();
         fs::write(dir.join("focus-click.log"), "keep").unwrap();
 
-        cleanup_stale_state_files_in(&dir, SystemTime::now(), Duration::ZERO, Duration::ZERO)
-            .unwrap();
+        cleanup_stale_state_files_in(
+            &dir,
+            SystemTime::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         assert!(!dir.join("focus-old.sh").exists());
         assert!(!dir.join("herdr-w1-p1.result.123456").exists());
         assert!(!dir.join("herdr-w1-p1.status.123456").exists());
         assert!(!dir.join("herdr-w1-p1.cleared").exists());
+        assert!(!dir.join("focus-origin-w1.marker").exists());
         assert!(dir.join("focus-click.log").exists());
         fs::remove_dir_all(dir).unwrap();
     }

@@ -45,7 +45,7 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
 3. **Notification decision**:
    - Only `blocked` and `done` statuses can produce notifications (they are the ones that need user action). There is no configuration to change this set.
    - The decision is one of `Skip`, `Send`, or `SendWithVisibilityMonitor`: `Skip` only when the target pane is focused **and** the frontmost macOS app matches the terminal bound to the pane's workspace (learned from `pane.focused` events); `SendWithVisibilityMonitor` when the pane is focused but the frontmost app differs from the bound terminal, so the notification auto-dismisses once the pane is seen; plain `Send` otherwise (including when the frontmost app or the binding is unknown), to avoid missing a state change.
-   - `pane.focused` events bind the frontmost terminal to the pane's workspace (`learn_terminal_from_frontmost`), so the plugin works with zero configuration.
+   - `pane.focused` events bind the frontmost terminal to the pane's workspace (`learn_terminal_from_frontmost`), so the plugin works with zero configuration. Notification-originated focus events are marked and cannot overwrite the binding; obvious non-terminal bundle IDs are ignored as a defense in depth.
    - Recognized agent names are matched to bundled local PNG icons and passed to `alerter` with `--app-icon`.
    - Notification titles and bodies use short status-specific copy: blocked agents ask the user to review and respond, while done agents ask the user to review the result. The plugin does not read or summarize pane contents.
 4. **Binary resolution**:
@@ -56,19 +56,19 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - The script name is a hash of the pane ID, so repeated events for one pane reuse the same script path. Old generated scripts and crashed notifier temp files are cleaned up opportunistically.
    - The script is made executable with mode `0o700`.
 6. **Notification delivery**:
-   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls `alerter`, then activates the terminal learned for the pane's workspace (`open -b <bound bundle id>`) and invokes the binary’s internal `--focus-pane` action if the user clicks the notification. It runs `herdr agent focus <pane>`, then `herdr tab focus <tab_id>` with the returned tab ID to synchronize Herdr 0.9.0 client views.
+   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls `alerter`, then invokes the binary's internal `--focus-pane` action if the user clicks the notification. That action re-reads the current workspace binding, activates it with `open -b <bound bundle id>`, marks the operation as plugin-originated, and runs `herdr agent focus <pane>` followed by `herdr tab focus <tab_id>` with the returned tab ID to synchronize Herdr 0.9.0 client views. With no binding, the action exits without activating an app or invoking Herdr.
    - `--test` runs the generated script in the foreground so notifier failures surface through stderr and a non-zero exit code.
 
 ## Configuration
 
-The plugin is zero-config: as of 0.4.0 there is no `.env` file and no `HERDR_FOCUS_NOTIFY_*` variables. Notification statuses (`blocked`, `done`), the 3600-second auto-dismiss timeout, `alerter` auto-detection, and per-workspace terminal activation are built-in defaults.
+The plugin is zero-config: as of 0.4.0 there is no `.env` file and no `HERDR_FOCUS_NOTIFY_*` variables. Notification statuses (`blocked`, `done`), the 3600-second auto-dismiss timeout, `alerter` auto-detection, per-workspace terminal activation, and the **Clear saved terminal bindings** action are built-in defaults.
 
 Two environment hooks remain for tests and unusual installs:
 
 | Variable | Effect |
 |---|---|
 | `HERDR_BIN_PATH` | Explicit path to the `herdr` binary; takes precedence over `PATH` and the hard-coded candidates. |
-| `HERDR_PLUGIN_STATE_DIR` | Overrides the state directory, where generated scripts, `terminal-memory.json`, and cleanup markers live (falls back to `$TMPDIR/herdr-focus-notify`). |
+| `HERDR_PLUGIN_STATE_DIR` | Overrides the state directory, where generated scripts, `terminal-memory.json`, focus-origin markers, and cleanup markers live (falls back to `$TMPDIR/herdr-focus-notify`). |
 
 Herdr itself also sets `HERDR_PLUGIN_EVENT_JSON` (event payload) and `HERDR_PLUGIN_EVENT` (event name) when invoking the plugin.
 
@@ -94,6 +94,6 @@ Bundled agent icons are extracted from `@lobehub/icons-static-png` (except `omp.
 
 - **macOS only**: The plugin manifest declares `platforms = ["macos"]`. The binary uses AppleScript (`osascript`) and macOS-specific app/bundle APIs; it will not behave correctly on other platforms.
 - **No-event quiet path**: A normal plugin invocation without `HERDR_PLUGIN_EVENT_JSON` exits quietly with `0`. Real parsing, script, and notifier errors should surface through stderr and non-zero exit codes.
-- **Skip logic is conservative**: A notification is only suppressed when the plugin can *confirm* the pane is focused and the frontmost app is the terminal bound to the pane's workspace. Any ambiguity (AppleScript failure, unknown frontmost app, missing binding) results in a notification being sent. The learned-terminal file lives in the state directory as `terminal-memory.json` and is deliberately excluded from the stale-file sweep.
-- **State directory hygiene**: Generated scripts are keyed by a hash of the pane ID, so repeated events for one pane reuse the same script path. A retention sweep removes stale generated scripts (30 days), crashed notifier temp files (24 hours), and `.cleared` focus markers (24 hours); it runs on `--cleanup` (including the Herdr startup hook) and opportunistically before each notification.
+- **Skip logic is conservative**: A notification is only suppressed when the plugin can *confirm* the pane is focused and the frontmost app is the terminal bound to the pane's workspace. Any ambiguity (AppleScript failure, unknown frontmost app, missing binding) results in a notification being sent. The learned-terminal file lives in the state directory as `terminal-memory.json` and is deliberately excluded from the stale-file sweep. Obvious non-terminal bundle IDs are treated as unbound when read.
+- **State directory hygiene**: Generated scripts are keyed by a hash of the pane ID, so repeated events for one pane reuse the same script path. A retention sweep removes stale generated scripts (30 days), focus-origin markers (15 seconds), crashed notifier temp files (24 hours), and `.cleared` focus markers (24 hours); it runs on `--cleanup` (including the Herdr startup hook) and opportunistically before each notification. Cleanup and the clear-bindings action also remove the old captured `open -b` line from scripts generated by earlier versions.
 - **`herdr-plugin.toml` is the source of truth for execution**: Herdr invokes `target/release/herdr-focus-notify` directly for events and actions, not `cargo run`. The binary must be built before the plugin action/event works.

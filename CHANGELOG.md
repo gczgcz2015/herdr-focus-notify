@@ -2,6 +2,16 @@
 
 All notable changes to `herdr-focus-notify` are documented here.
 
+## [0.5.1] - 2026-09-15
+
+### Fixed
+
+- Prevent notification-triggered focus events from rebinding a workspace to the frontmost browser or notification app.
+- Skip terminal activation and Herdr focus when a workspace has no saved terminal binding.
+- Move terminal activation to click time and add a plugin action for clearing saved bindings, including captured activation commands in existing generated scripts.
+- Clear the focus-origin marker on every failed notification focus path.
+- Continue rewriting generated scripts when individual files disappear or cannot be read.
+
 ## [0.5.0] - 2026-09-08
 
 ### Fixed

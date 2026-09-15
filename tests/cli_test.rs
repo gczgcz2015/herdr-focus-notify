@@ -365,6 +365,12 @@ fn focus_click_projects_the_selected_agents_actual_tab() {
     let temp_dir = temp_test_dir();
     let herdr = temp_dir.join("herdr");
     let log = temp_dir.join("focus.log");
+    let open_log = temp_dir.join("open.log");
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
+    write_executable(
+        &temp_dir.join("open"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\n",
+    );
     write_executable(
         &herdr,
         r#"#!/bin/sh
@@ -379,7 +385,10 @@ fi
     let output = binary()
         .args(["--focus-pane", "w2:p7"])
         .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("HERDR_LOG", &log)
+        .env("OPEN_LOG", &open_log)
+        .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
     assert!(
@@ -391,6 +400,10 @@ fi
         fs::read_to_string(log).unwrap(),
         "agent focus w2:p7\ntab focus w2:t3\n"
     );
+    assert_eq!(
+        fs::read_to_string(open_log).unwrap(),
+        "-b com.example.terminal\n"
+    );
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
@@ -400,6 +413,8 @@ fn focus_click_reports_failures_without_guessing_a_tab() {
     let temp_dir = temp_test_dir();
     let herdr = temp_dir.join("herdr");
     let log = temp_dir.join("focus.log");
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
+    write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
     for (response, exit_code, expected) in [
         ("{}", 1, "failed to focus agent"),
         ("not json", 0, "invalid agent focus json"),
@@ -409,12 +424,15 @@ fn focus_click_reports_failures_without_guessing_a_tab() {
         let output = binary()
             .args(["--focus-pane", "w2:p7"])
             .env("HERDR_BIN_PATH", &herdr)
+            .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
             .env("HERDR_LOG", &log)
+            .env("PATH", path_with_temp_dir(&temp_dir))
             .output()
             .unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
         assert_eq!(fs::read_to_string(&log).unwrap(), "agent focus w2:p7\n");
+        assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
     }
     write_executable(
         &herdr,
@@ -430,11 +448,14 @@ fi
     let output = binary()
         .args(["--focus-pane", "w2:p7"])
         .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
+        .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("failed to focus tab: tab no longer exists"));
+    assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
@@ -444,6 +465,8 @@ fn notification_content_click_runs_the_focus_helper() {
     let temp_dir = temp_test_dir();
     let herdr = temp_dir.join("herdr");
     let log = temp_dir.join("click.log");
+    let open_log = temp_dir.join("open.log");
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
     write_executable(
         &herdr,
         r#"#!/bin/sh
@@ -462,12 +485,17 @@ esac
         &temp_dir.join("alerter"),
         "#!/bin/sh\necho '@CONTENTCLICKED'\n",
     );
+    write_executable(
+        &temp_dir.join("open"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\n",
+    );
     write_executable(&temp_dir.join("osascript"), "#!/bin/sh\nexit 1\n");
     let output = binary()
         .arg("--test")
         .env("HERDR_BIN_PATH", &herdr)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("HERDR_LOG", &log)
+        .env("OPEN_LOG", &open_log)
         .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
@@ -480,5 +508,183 @@ esac
         fs::read_to_string(log).unwrap(),
         "agent focus w2:p7\ntab focus w2:t3\n"
     );
+    assert_eq!(
+        fs::read_to_string(open_log).unwrap(),
+        "-b com.example.terminal\n"
+    );
     fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn focus_click_without_terminal_binding_does_not_activate_or_focus() {
+    let temp_dir = temp_test_dir();
+    let herdr_log = temp_dir.join("herdr.log");
+    let open_log = temp_dir.join("open.log");
+    write_executable(
+        &temp_dir.join("herdr"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HERDR_LOG\"\nexit 1\n",
+    );
+    write_executable(
+        &temp_dir.join("open"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\nexit 1\n",
+    );
+
+    let output = binary()
+        .args(["--focus-pane", "w2:p7"])
+        .env("HERDR_BIN_PATH", temp_dir.join("missing-herdr"))
+        .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
+        .env("HERDR_LOG", &herdr_log)
+        .env("OPEN_LOG", &open_log)
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(!herdr_log.exists());
+    assert!(!open_log.exists());
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn notification_focus_does_not_overwrite_existing_terminal_binding() {
+    let temp_dir = temp_test_dir();
+    let state_dir = temp_dir.join("state");
+    let frontmost_state = temp_dir.join("frontmost");
+    let herdr = temp_dir.join("herdr");
+    write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
+    fs::write(&frontmost_state, "com.example.notification-app\n").unwrap();
+    write_executable(
+        &temp_dir.join("osascript"),
+        "#!/bin/sh\ncat \"$FRONTMOST_STATE\"\n",
+    );
+    write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
+    write_executable(
+        &herdr,
+        r#"#!/bin/sh
+case "$1 $2" in
+  'agent focus') echo '{"result":{"agent":{"tab_id":"w1:t1"}}}' ;;
+  'tab focus') exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+
+    let focus = binary()
+        .args(["--focus-pane", "w1:p2"])
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .env("FRONTMOST_STATE", &frontmost_state)
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+    assert!(
+        focus.status.success(),
+        "{}",
+        String::from_utf8_lossy(&focus.stderr)
+    );
+
+    let event = binary()
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .env("HERDR_PLUGIN_EVENT", "pane.focused")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane.focused","data":{"pane_id":"w1:p2"}}"#,
+        )
+        .env("FRONTMOST_STATE", &frontmost_state)
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+    assert!(
+        event.status.success(),
+        "{}",
+        String::from_utf8_lossy(&event.stderr)
+    );
+
+    assert_eq!(
+        fs::read_to_string(state_dir.join("terminal-memory.json")).unwrap(),
+        r#"{"workspaces":{"w1":"com.mitchellh.ghostty"}}"#
+    );
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn obvious_non_terminal_does_not_overwrite_existing_terminal_binding() {
+    let temp_dir = temp_test_dir();
+    let state_dir = temp_dir.join("state");
+    let frontmost_state = temp_dir.join("frontmost");
+    let herdr = temp_dir.join("herdr");
+    write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
+    fs::write(&frontmost_state, "com.google.Chrome\n").unwrap();
+    write_executable(
+        &temp_dir.join("osascript"),
+        "#!/bin/sh\ncat \"$FRONTMOST_STATE\"\n",
+    );
+    write_executable(&herdr, "#!/bin/sh\nexit 0\n");
+
+    let output = binary()
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .env("HERDR_PLUGIN_EVENT", "pane.focused")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane.focused","data":{"pane_id":"w1:p2"}}"#,
+        )
+        .env("FRONTMOST_STATE", &frontmost_state)
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(state_dir.join("terminal-memory.json")).unwrap(),
+        r#"{"workspaces":{"w1":"com.mitchellh.ghostty"}}"#
+    );
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn clear_terminal_bindings_removes_old_activation_commands() {
+    let temp_dir = temp_test_dir();
+    let state_dir = temp_dir.join("state");
+    write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
+    let script = state_dir.join("focus-old.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\n    open -b 'com.google.Chrome' >/dev/null 2>&1\n    exec focus\n",
+    )
+    .unwrap();
+
+    let output = binary()
+        .arg("--clear-terminal-bindings")
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!state_dir.join("terminal-memory.json").exists());
+    assert!(!fs::read_to_string(script).unwrap().contains("open -b"));
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+fn write_terminal_binding(state_dir: &Path, workspace: &str, bundle_id: &str) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        state_dir.join("terminal-memory.json"),
+        format!(r#"{{"workspaces":{{"{workspace}":"{bundle_id}"}}}}"#),
+    )
+    .unwrap();
 }

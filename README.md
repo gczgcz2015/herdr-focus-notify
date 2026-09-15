@@ -43,7 +43,7 @@ herdr plugin link .
 
 ### 3. Done — zero configuration
 
-The plugin works with **zero configuration**. The first time you focus a pane in Herdr, the plugin binds the frontmost terminal to that pane's workspace, then uses it to activate the terminal on click and to recognise when you are already looking at a pane. Bindings are per-workspace: switch from kitty to Ghostty and keep working on the same pane, and clicking a notification activates Ghostty.
+The plugin works with **zero configuration**. The first time you focus a pane in Herdr, the plugin binds the frontmost terminal to that pane's workspace, then uses it to activate the terminal on click and to recognise when you are already looking at a pane. Bindings are per-workspace: switch from kitty to Ghostty and keep working on the same pane, and clicking a notification activates Ghostty. A notification click never changes the binding, even when the browser or another app is frontmost during the click.
 
 No configuration files needed. The only external dependency is alerter, auto-detected from `PATH` and common Homebrew locations:
 
@@ -63,7 +63,7 @@ By default, `blocked` and `done` status changes can produce a notification. The 
 | The terminal bound to the pane's workspace is frontmost and the pane is focused | Skipped (you are looking at Herdr) |
 | The focused app cannot be determined | Sent, to avoid missing a change |
 
-Clicking a notification activates the terminal bound to the pane's workspace, then runs `herdr agent focus <pane>` followed by `herdr tab focus <tab_id>` using the returned tab ID. The second command makes Herdr 0.9.0 clients display the selected pane. When multiple clients share a server, it switches all of them to that tab.
+Clicking a notification with a saved terminal binding activates that terminal, then runs `herdr agent focus <pane>` followed by `herdr tab focus <tab_id>` using the returned tab ID. The second command makes Herdr 0.9.0 clients display the selected pane. When multiple clients share a server, it switches all of them to that tab. If the workspace has no binding, the click does not activate an app or issue a Herdr focus command; focus the pane manually once in the terminal to establish the binding.
 
 Blocked notifications say that the agent needs your input and prompt you to review and respond. Done notifications say that the agent finished and prompt you to review the result. The plugin does not read or summarize pane contents.
 
@@ -84,7 +84,8 @@ The `--test` action sends a real test notification (capped at 10 seconds) so you
 | Problem | What to check |
 |---|---|
 | No notification appears | Make sure `alerter` is installed and executable; it is auto-detected from `PATH` and common Homebrew locations (`brew install vjeantet/tap/alerter`). |
-| Click does not bring forward the expected terminal | Focus any pane once in Herdr first — the plugin learns your terminal from that moment, per workspace. |
+| Click does not bring forward the expected terminal | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
+| A workspace has a stale terminal binding | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
 | Notifications appear while you are viewing Herdr | You were not in the workspace's bound terminal at that moment; the plugin errs on the side of notifying rather than missing a state change. |
 | Need diagnostic information | Run the plugin with `--test` or `--check-pane-visibility <pane_id>` to exercise the pipeline and focus checks directly. |
 
