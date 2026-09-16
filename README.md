@@ -8,7 +8,7 @@ It is designed to notify you only when the change is easy to miss: when Herdr is
 
 ## Herdr compatibility
 
-For **Herdr 0.9.0, use plugin tag `v0.5.0` or later**. The `v0.4.0` tag predates the client focus changes: clicking a notification may activate the terminal without switching to the target pane. `v0.5.0` adds explicit tab focus after selecting the agent.
+For **Herdr 0.9.0, use plugin tag `v0.5.0` or later**. The `v0.4.0` tag predates the client focus changes: clicking a notification may activate the terminal without switching to the target pane. Later versions explicitly project the target pane into attached client views.
 
 The minimum supported Herdr version remains `0.7.5`. Workspace-to-terminal bindings are unchanged.
 
@@ -63,7 +63,7 @@ By default, `blocked` and `done` status changes can produce a notification. The 
 | The terminal bound to the pane's workspace is frontmost and the pane is focused | Skipped (you are looking at Herdr) |
 | The focused app cannot be determined | Sent, to avoid missing a change |
 
-Clicking a notification with a saved terminal binding activates that terminal, then runs `herdr agent focus <pane>` followed by `herdr tab focus <tab_id>` using the returned tab ID. The second command makes Herdr 0.9.0 clients display the selected pane. When multiple clients share a server, it switches all of them to that tab. If the workspace has no binding, the click does not activate an app or issue a Herdr focus command; focus the pane manually once in the terminal to establish the binding.
+Clicking a notification with a saved terminal binding activates that terminal, then sends Herdr's `pane.focus` socket request for the notification's pane. This atomically displays the matching workspace, tab, and pane, including ordinary shell panes without a detected agent. When multiple clients share a server, it switches all of them to that pane. If the workspace has no binding, the click does not activate an app or issue a Herdr focus request; focus the pane manually once in the terminal to establish the binding.
 
 Blocked notifications say that the agent needs your input and prompt you to review and respond. Done notifications say that the agent finished and prompt you to review the result. The plugin does not read or summarize pane contents.
 
