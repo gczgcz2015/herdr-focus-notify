@@ -53,11 +53,7 @@ fn test_mode_reports_bad_configured_herdr_binary() {
 fn focus_event_removes_notification_for_foreground_terminal() {
     let temp_dir = temp_test_dir();
 
-    let osascript = temp_dir.join("osascript");
-    write_executable(
-        &osascript,
-        "#!/bin/sh\nprintf '%s\\n' 'com.example.terminal'\n",
-    );
+    write_fixed_frontmost(&temp_dir, "com.example.terminal");
 
     let notifier = temp_dir.join("alerter");
     write_executable(
@@ -94,11 +90,7 @@ fn visible_focused_pane_removes_its_pending_notification() {
 
     let frontmost_state = temp_dir.join("frontmost-bundle-id");
 
-    let osascript = temp_dir.join("osascript");
-    write_executable(
-        &osascript,
-        "#!/bin/sh\ncase \"$*\" in\n  *frontmost*) cat \"$FRONTMOST_STATE\" ;;\n  *) printf '%s\\n' 'com.example.terminal' ;;\nesac\n",
-    );
+    write_state_frontmost(&temp_dir);
 
     let herdr = temp_dir.join("herdr");
     write_executable(
@@ -168,13 +160,9 @@ fn visible_focused_pane_removes_its_pending_notification() {
 fn test_mode_notifies_even_when_pane_is_visible_and_status_filtered() {
     let temp_dir = temp_test_dir();
 
-    // Both bundle-ID queries answer with the configured app, so the pane
-    // counts as visible and a normal event would be skipped.
-    let osascript = temp_dir.join("osascript");
-    write_executable(
-        &osascript,
-        "#!/bin/sh\nprintf '%s\\n' 'com.example.terminal'\n",
-    );
+    // The frontmost app is the configured terminal, so the pane counts as
+    // visible and a normal event would be skipped.
+    write_fixed_frontmost(&temp_dir, "com.example.terminal");
 
     let herdr = temp_dir.join("herdr");
     write_executable(
@@ -274,11 +262,7 @@ fn unfocused_pane_does_not_start_a_visibility_monitor() {
     let focused_pane_state = temp_dir.join("focused-pane-id");
     fs::write(&focused_pane_state, "w1:p1\n").unwrap();
 
-    let osascript = temp_dir.join("osascript");
-    write_executable(
-        &osascript,
-        "#!/bin/sh\ncase \"$*\" in\n  *frontmost*) cat \"$FRONTMOST_STATE\" ;;\n  *) printf '%s\\n' 'com.example.terminal' ;;\nesac\n",
-    );
+    write_state_frontmost(&temp_dir);
 
     let herdr = temp_dir.join("herdr");
     write_executable(
@@ -357,6 +341,29 @@ fn write_executable(path: &Path, content: &str) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(path, permissions).unwrap();
+}
+
+/// Fakes the frontmost-app lookup with a fixed bundle id. Tests cannot drive
+/// the real window server, so the shim answers both `lsappinfo` calls the
+/// plugin makes: `front` (an ASN) and `info -only bundleID <asn>`.
+#[cfg(unix)]
+fn write_fixed_frontmost(temp_dir: &Path, bundle_id: &str) {
+    write_executable(
+        &temp_dir.join("lsappinfo"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  front) printf '%s\\n' 'ASN:0x0-0x1:' ;;\n  *) printf 'bundleID=\"{bundle_id}\"\\n' ;;\nesac\n"
+        ),
+    );
+}
+
+/// Fakes the frontmost-app lookup so it answers from `$FRONTMOST_STATE`,
+/// letting a test change the frontmost app while the binary is running.
+#[cfg(unix)]
+fn write_state_frontmost(temp_dir: &Path) {
+    write_executable(
+        &temp_dir.join("lsappinfo"),
+        "#!/bin/sh\ncase \"$1\" in\n  front) printf '%s\\n' 'ASN:0x0-0x1:' ;;\n  *) printf 'bundleID=\"%s\"\\n' \"$(cat \"$FRONTMOST_STATE\")\" ;;\nesac\n",
+    );
 }
 
 #[cfg(unix)]
@@ -489,7 +496,7 @@ esac
         &temp_dir.join("open"),
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\n",
     );
-    write_executable(&temp_dir.join("osascript"), "#!/bin/sh\nexit 1\n");
+    write_executable(&temp_dir.join("lsappinfo"), "#!/bin/sh\nexit 1\n");
     let output = binary()
         .arg("--test")
         .env("HERDR_BIN_PATH", &herdr)
@@ -555,10 +562,7 @@ fn notification_focus_does_not_overwrite_existing_terminal_binding() {
     let herdr = temp_dir.join("herdr");
     write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
     fs::write(&frontmost_state, "com.example.notification-app\n").unwrap();
-    write_executable(
-        &temp_dir.join("osascript"),
-        "#!/bin/sh\ncat \"$FRONTMOST_STATE\"\n",
-    );
+    write_state_frontmost(&temp_dir);
     write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
     write_executable(
         &herdr,
@@ -619,10 +623,7 @@ fn obvious_non_terminal_does_not_overwrite_existing_terminal_binding() {
     let herdr = temp_dir.join("herdr");
     write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
     fs::write(&frontmost_state, "com.google.Chrome\n").unwrap();
-    write_executable(
-        &temp_dir.join("osascript"),
-        "#!/bin/sh\ncat \"$FRONTMOST_STATE\"\n",
-    );
+    write_state_frontmost(&temp_dir);
     write_executable(&herdr, "#!/bin/sh\nexit 0\n");
 
     let output = binary()

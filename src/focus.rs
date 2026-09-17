@@ -131,43 +131,49 @@ pub(crate) fn notification_decision(pane_id: &str, herdr_bin: &str) -> Notificat
 /// removed. The user only sees the pane when the frontmost app is the terminal
 /// bound to its workspace, so removal requires the frontmost bundle id to be
 /// that terminal (never a random app).
-pub(crate) fn should_clear_notification_on_focus(workspace: &str) -> bool {
-    match (
-        frontmost_bundle_id(),
-        crate::state::remembered_terminal(workspace),
-    ) {
+pub(crate) fn should_clear_notification_on_focus(workspace: &str, frontmost: Option<&str>) -> bool {
+    match (frontmost, crate::state::remembered_terminal(workspace)) {
         (Some(frontmost), Some(bound)) => frontmost == bound,
         _ => false,
     }
 }
 
-/// Learns the currently frontmost app as the terminal bound to `workspace`.
+/// Learns `frontmost` as the terminal bound to `workspace`.
+///
+/// The caller passes the frontmost app it observed for this focus event, so
+/// learning and the clear decision agree on a single sample instead of reading
+/// the frontmost app twice. This matters because both reads describe a focus
+/// change that has already happened: the later they run, the greater the chance
+/// the user has switched to another app and the workspace goes unbound.
 ///
 /// A focus event produced by a notification click must not overwrite the
 /// workspace binding with the browser or notification app that was frontmost
 /// when the click happened. Obvious non-terminal apps are also rejected as a
 /// defense in depth, while unknown apps remain eligible so real terminals and
 /// IDEs with integrated terminals still work without configuration.
-pub(crate) fn learn_terminal_from_frontmost(workspace: &str) -> Option<String> {
+pub(crate) fn learn_terminal_from_frontmost(
+    workspace: &str,
+    frontmost: Option<&str>,
+) -> Option<String> {
     let existing = crate::state::remembered_terminal(workspace);
     if crate::state::focus_origin_is_active(workspace) {
         return existing;
     }
 
-    let frontmost = frontmost_bundle_id()?;
-    if crate::state::is_obvious_non_terminal_bundle(&frontmost) {
+    let frontmost = frontmost?;
+    if crate::state::is_obvious_non_terminal_bundle(frontmost) {
         return existing;
     }
     // Skip the write when the workspace is already bound to this app.
-    if existing.as_deref() == Some(frontmost.as_str()) {
-        return Some(frontmost);
+    if existing.as_deref() == Some(frontmost) {
+        return Some(frontmost.to_string());
     }
-    crate::state::remember_terminal(workspace, &frontmost).ok()?;
-    Some(frontmost)
+    crate::state::remember_terminal(workspace, frontmost).ok()?;
+    Some(frontmost.to_string())
 }
 
 fn pane_is_focused(pane_id: &str, herdr_bin: &str) -> bool {
-    let Some(json) = run_herdr(herdr_bin, &["agent", "get", pane_id]) else {
+    let Some(json) = command_stdout(herdr_bin, &["agent", "get", pane_id]) else {
         return false;
     };
     agent_is_focused_from_get_json(&json, pane_id)
@@ -176,36 +182,42 @@ fn pane_is_focused(pane_id: &str, herdr_bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Runs herdr with the given arguments and returns its stdout on success.
-/// None when the binary is missing, the command fails, or the output is not
-/// valid UTF-8.
-fn run_herdr(herdr_bin: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(herdr_bin).args(args).output().ok()?;
+/// Runs a command and returns its stdout on success. None when the binary is
+/// missing, the command fails, or the output is not valid UTF-8.
+fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(bin).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
     String::from_utf8(output.stdout).ok()
 }
 
-fn frontmost_bundle_id() -> Option<String> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to return bundle identifier of first application process whose frontmost is true")
-        .output()
-        .ok()?;
+/// The bundle identifier of the frontmost macOS app, or None when it cannot be
+/// determined.
+///
+/// `lsappinfo` answers in ~10ms, where the AppleScript/System Events query it
+/// replaces took ~170ms and ran twice per `pane.focused` event. The answer
+/// describes a focus change that already happened, so a slow read observes the
+/// app frontmost well after the fact and can miss the terminal entirely.
+pub(crate) fn frontmost_bundle_id() -> Option<String> {
+    let asn = command_stdout("lsappinfo", &["front"])?;
+    let info = command_stdout("lsappinfo", &["info", "-only", "bundleID", asn.trim()])?;
+    bundle_id_from_lsappinfo(&info)
+}
 
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+/// Reads the `bundleID="..."` field out of `lsappinfo info` output. An app
+/// without a bundle identifier reports `[ NULL ]`, which is not a binding.
+fn bundle_id_from_lsappinfo(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("bundleID="))
+        .map(|value| value.trim_matches('"').trim().to_string())
+        .filter(|value| !value.is_empty() && !value.starts_with('['))
 }
 
 fn focused_pane_id(herdr_bin: &str) -> Option<String> {
-    let json = run_herdr(herdr_bin, &["pane", "list"])?;
+    let json = command_stdout(herdr_bin, &["pane", "list"])?;
     focused_pane_id_from_pane_list_json(&json).ok().flatten()
 }
 
@@ -246,7 +258,7 @@ fn agent_is_focused_from_get_json(
 /// empty output, or no panes at all) so callers never prune bindings against
 /// an empty world — e.g. right after Herdr itself started.
 pub(crate) fn live_workspace_ids(herdr_bin: &str) -> Option<Vec<String>> {
-    let json = run_herdr(herdr_bin, &["pane", "list"])?;
+    let json = command_stdout(herdr_bin, &["pane", "list"])?;
     let live = live_workspace_ids_from_pane_list_json(&json)
         .ok()
         .flatten()?;
@@ -425,5 +437,19 @@ mod tests {
             ),
             NotificationDecision::Send
         );
+    }
+
+    #[test]
+    fn reads_bundle_id_from_lsappinfo_output() {
+        let info = "[ NULL ]  ASN:0x0-0x3e03e: (in front)\n    bundleID=\"net.kovidgoyal.kitty\"\n    bundle path=[ NULL ] \n    executable path=[ NULL ] \n";
+
+        assert_eq!(
+            bundle_id_from_lsappinfo(info).as_deref(),
+            Some("net.kovidgoyal.kitty")
+        );
+        // `bundle path` and `executable path` are separate fields, and an app
+        // without a bundle identifier must not become a binding.
+        assert_eq!(bundle_id_from_lsappinfo("    bundleID=[ NULL ] \n"), None);
+        assert_eq!(bundle_id_from_lsappinfo(""), None);
     }
 }

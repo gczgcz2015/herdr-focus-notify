@@ -16,8 +16,8 @@ use cli::{parse_cli_args, print_usage, CliAction};
 use event::{focused_pane_id_from_event_json, notification_from_event_json, status_is_enabled};
 use executable::resolve_herdr_bin;
 use focus::{
-    learn_terminal_from_frontmost, notification_decision, should_clear_notification_on_focus,
-    test_notification, NotificationDecision,
+    frontmost_bundle_id, learn_terminal_from_frontmost, notification_decision,
+    should_clear_notification_on_focus, test_notification, NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
 use script::{rewrite_generated_scripts_without_activation, write_focus_script};
@@ -95,13 +95,17 @@ fn run() -> Result<(), String> {
                 };
 
                 // Zero-configuration terminal detection: bind the frontmost
-                // terminal to this pane's workspace. learn_terminal_from_frontmost
-                // ignores notification-originated focus events and obvious
-                // non-terminal apps, while keeping this event path best-effort.
+                // terminal to this pane's workspace. Both decisions below share
+                // one frontmost lookup, taken as early as possible because the
+                // app it reports must still be the one the user focused from.
+                // learn_terminal_from_frontmost ignores notification-originated
+                // focus events and obvious non-terminal apps, while keeping this
+                // event path best-effort.
+                let frontmost = frontmost_bundle_id();
                 let workspace = util::workspace_id_from_pane_id(&pane_id).unwrap_or("default");
-                learn_terminal_from_frontmost(workspace);
+                learn_terminal_from_frontmost(workspace, frontmost.as_deref());
 
-                if should_clear_notification_on_focus(workspace) {
+                if should_clear_notification_on_focus(workspace, frontmost.as_deref()) {
                     let notifier_bin = resolve_notifier_bin()?;
                     mark_notification_cleared(&pane_id)
                         .map_err(|err| format!("failed to mark notification as cleared: {err}"))?;

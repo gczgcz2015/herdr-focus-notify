@@ -2,6 +2,16 @@
 
 All notable changes to `herdr-focus-notify` are documented here.
 
+## [0.5.2] - 2026-09-17
+
+### Fixed
+
+- Learn a workspace's terminal promptly. The frontmost app is now read once per `pane.focused` event, and from `lsappinfo` instead of AppleScript/System Events, cutting the handler from ~350ms to ~20ms. A binding describes a focus change that has already happened, so the slower lookup observed whatever app was frontmost afterwards: switching apps right after focusing a pane silently left that workspace unbound, and an unbound workspace makes a notification click a silent no-op.
+
+### Changed
+
+- The frontmost-app lookup no longer uses AppleScript, so it no longer depends on System Events automation permission.
+
 ## [0.5.1] - 2026-09-15
 
 ### Fixed
