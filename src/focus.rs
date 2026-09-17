@@ -1,11 +1,17 @@
 use serde::Deserialize;
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::notification::FocusNotification;
 use crate::util::sanitize_group_id;
+
+/// How long a notification click waits for Herdr's pane focus response. A real
+/// click runs detached, where an unanswered request would leave a stray process
+/// behind; `--test` runs in the foreground and would hang the action outright.
+const FOCUS_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct PaneListEnvelope {
@@ -82,6 +88,9 @@ fn focus_pane_via_socket(pane_id: &str) -> Result<(), String> {
         .map_err(|_| "HERDR_SOCKET_PATH is unavailable".to_string())?;
     let mut stream = UnixStream::connect(&socket_path)
         .map_err(|err| format!("failed to connect to Herdr socket {socket_path}: {err}"))?;
+    stream
+        .set_read_timeout(Some(FOCUS_SOCKET_TIMEOUT))
+        .map_err(|err| format!("failed to configure Herdr socket timeout: {err}"))?;
     let request = serde_json::json!({
         "id": "herdr-focus-notify:focus",
         "method": "pane.focus",
@@ -97,7 +106,16 @@ fn focus_pane_via_socket(pane_id: &str) -> Result<(), String> {
     let mut response_line = String::new();
     BufReader::new(stream)
         .read_line(&mut response_line)
-        .map_err(|err| format!("failed to read pane focus response: {err}"))?;
+        .map_err(|err| {
+            if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                format!(
+                    "timed out after {}s waiting for Herdr's pane focus response",
+                    FOCUS_SOCKET_TIMEOUT.as_secs()
+                )
+            } else {
+                format!("failed to read pane focus response: {err}")
+            }
+        })?;
     if response_line.is_empty() {
         return Err("Herdr closed the socket without a pane focus response".to_string());
     }

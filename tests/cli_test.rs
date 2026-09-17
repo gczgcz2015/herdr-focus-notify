@@ -370,14 +370,21 @@ fn write_state_frontmost(temp_dir: &Path) {
     );
 }
 
+/// A short `/tmp` socket path. The bound path must stay under `sun_path`'s
+/// ~104-byte limit, so it cannot live in the long per-test temp directory.
 #[cfg(unix)]
-fn focus_socket(expected_pane_id: &str, response: &str) -> (PathBuf, std::thread::JoinHandle<()>) {
+fn unique_socket_path() -> PathBuf {
     static NEXT_SOCKET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let socket_path = PathBuf::from(format!(
+    PathBuf::from(format!(
         "/tmp/herdr-focus-notify-{}-{}.sock",
         std::process::id(),
         NEXT_SOCKET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    ))
+}
+
+#[cfg(unix)]
+fn focus_socket(expected_pane_id: &str, response: &str) -> (PathBuf, std::thread::JoinHandle<()>) {
+    let socket_path = unique_socket_path();
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let cleanup_path = socket_path.clone();
@@ -503,6 +510,60 @@ fn focus_click_reports_socket_api_failures() {
         assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
         assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
     }
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn focus_click_reports_a_socket_that_never_answers() {
+    let temp_dir = temp_test_dir();
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
+    write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
+
+    let socket_path = unique_socket_path();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_in_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        // Hold the connection open without answering: the client has to give up
+        // on its own read timeout, not on this side closing the socket. The
+        // bounded hold turns a missing timeout into a failed assertion instead
+        // of a test that hangs forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !stop_in_thread.load(std::sync::atomic::Ordering::Relaxed)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(stream);
+    });
+
+    let started = std::time::Instant::now();
+    let output = binary()
+        .args(["--focus-pane", "w2:p7"])
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("timed out after 5s"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "client waited {elapsed:?}"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    handle.join().unwrap();
+    fs::remove_file(&socket_path).unwrap();
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
