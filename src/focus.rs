@@ -1,8 +1,17 @@
 use serde::Deserialize;
+use std::env;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::net::UnixStream;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::notification::FocusNotification;
 use crate::util::sanitize_group_id;
+
+/// How long a notification click waits for Herdr's pane focus response. A real
+/// click runs detached, where an unanswered request would leave a stray process
+/// behind; `--test` runs in the foreground and would hang the action outright.
+const FOCUS_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct PaneListEnvelope {
@@ -42,14 +51,14 @@ pub(crate) fn test_notification(herdr_bin: &str) -> FocusNotification {
     FocusNotification {
         pane_id: pane_id.clone(),
         status: "blocked".to_string(),
-        title: "Herdr Focus Notify test".to_string(),
-        body: format!("Click to focus pane {pane_id}."),
+        title: "Focus notification test".to_string(),
+        body: "Click to return to this Herdr pane.".to_string(),
         group: format!("herdr-{}", sanitize_group_id(&pane_id)),
         app_icon: None,
     }
 }
 
-/// Activates the workspace's bound terminal and focuses the target agent.
+/// Activates the workspace's bound terminal and focuses the target pane.
 ///
 /// Without a terminal binding there is no visible app to activate, so a
 /// notification click is intentionally a no-op. A binding is checked again
@@ -60,41 +69,11 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     let Some(bound_terminal) = crate::state::remembered_terminal(workspace) else {
         return Ok(());
     };
-    let herdr_bin = crate::executable::resolve_herdr_bin()?;
-
     crate::state::mark_focus_origin(workspace)
         .map_err(|err| format!("failed to mark notification focus: {err}"))?;
     let result = (|| -> Result<(), String> {
         activate_terminal(&bound_terminal)?;
-
-        let output = Command::new(&herdr_bin)
-            .args(["agent", "focus", pane_id])
-            .output()
-            .map_err(|err| format!("failed to focus agent: {err}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to focus agent: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|err| format!("invalid agent focus json: {err}"))?;
-        let tab_id = response
-            .pointer("/result/agent/tab_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .ok_or("agent focus response is missing tab_id")?;
-        let output = Command::new(&herdr_bin)
-            .args(["tab", "focus", tab_id])
-            .output()
-            .map_err(|err| format!("failed to focus tab: {err}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to focus tab: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(())
+        focus_pane_via_socket(pane_id)
     })();
 
     if result.is_err() {
@@ -102,6 +81,73 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     }
 
     result
+}
+
+fn focus_pane_via_socket(pane_id: &str) -> Result<(), String> {
+    let socket_path = env::var("HERDR_SOCKET_PATH")
+        .map_err(|_| "HERDR_SOCKET_PATH is unavailable".to_string())?;
+    let mut stream = UnixStream::connect(&socket_path)
+        .map_err(|err| format!("failed to connect to Herdr socket {socket_path}: {err}"))?;
+    stream
+        .set_read_timeout(Some(FOCUS_SOCKET_TIMEOUT))
+        .map_err(|err| format!("failed to configure Herdr socket timeout: {err}"))?;
+    let request = serde_json::json!({
+        "id": "herdr-focus-notify:focus",
+        "method": "pane.focus",
+        "params": {"pane_id": pane_id},
+    });
+
+    serde_json::to_writer(&mut stream, &request)
+        .map_err(|err| format!("failed to encode pane focus request: {err}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|err| format!("failed to send pane focus request: {err}"))?;
+
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .map_err(|err| {
+            if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                format!(
+                    "timed out after {}s waiting for Herdr's pane focus response",
+                    FOCUS_SOCKET_TIMEOUT.as_secs()
+                )
+            } else {
+                format!("failed to read pane focus response: {err}")
+            }
+        })?;
+    if response_line.is_empty() {
+        return Err("Herdr closed the socket without a pane focus response".to_string());
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&response_line)
+        .map_err(|err| format!("invalid pane focus response: {err}"))?;
+    if response.get("id").and_then(serde_json::Value::as_str) != Some("herdr-focus-notify:focus") {
+        return Err("pane focus response has an unexpected request id".to_string());
+    }
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown Herdr error");
+        return Err(format!("failed to focus pane: {message}"));
+    }
+
+    let result_type = response
+        .pointer("/result/type")
+        .and_then(serde_json::Value::as_str);
+    if result_type != Some("pane_info") {
+        return Err("pane focus response is missing pane_info result".to_string());
+    }
+    if response
+        .pointer("/result/pane/pane_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(pane_id)
+    {
+        return Err("pane focus response returned a different pane".to_string());
+    }
+
+    Ok(())
 }
 
 fn activate_terminal(bundle_id: &str) -> Result<(), String> {

@@ -8,7 +8,7 @@
 
 ## Herdr 版本兼容性
 
-**Herdr 0.9.0 请使用插件 tag `v0.5.0` 或更新版本**。`v0.4.0` 尚未适配客户端焦点变化，点击通知可能只激活终端而不切换到目标 pane。`v0.5.0` 在选中 agent 后增加了显式的标签页聚焦。
+**Herdr 0.9.0 请使用插件 tag `v0.5.0` 或更新版本**。`v0.4.0` 尚未适配客户端焦点变化，点击通知可能只激活终端而不切换到目标 pane。后续版本会把目标 pane 显式投射到已连接的客户端视图。
 
 最低支持的 Herdr 版本仍为 `0.7.5`。workspace 与终端的绑定行为保持不变。
 
@@ -63,7 +63,7 @@ brew install vjeantet/tap/alerter
 | 该 workspace 绑定的终端在前台，且焦点就是对应 pane | 跳过（你正在看 Herdr） |
 | 无法确定前台 App | 发送，避免遗漏状态变化 |
 
-点击通知后,如果该 workspace 已有终端绑定,插件会激活该终端,然后执行 `herdr agent focus <pane>`,并使用返回的 tab ID 执行 `herdr tab focus <tab_id>`。后一步让 Herdr 0.9.0 客户端显示选中的 pane；多个客户端连接同一服务端时,会一起切换到该标签页。如果 workspace 没有绑定,点击不会激活 App,也不会执行 Herdr focus；请先在预期终端中手动聚焦一次 pane。
+点击通知后,如果该 workspace 已有终端绑定,插件会激活该终端,然后通过 Herdr socket 发送目标 pane 的 `pane.focus` 请求。该请求会一次性显示对应的 workspace、tab 和 pane，也支持没有检测到 agent 的普通 shell pane。多个客户端连接同一服务端时,会一起切换到该 pane。如果 workspace 没有绑定,点击不会激活 App,也不会发送 Herdr focus 请求；请先在预期终端中手动聚焦一次 pane。
 
 `blocked` 通知会提示 Agent 需要你的输入，并引导你查看和回复；`done` 通知会提示 Agent 已完成，并引导你查看结果。插件不会读取或总结 pane 内容。
 

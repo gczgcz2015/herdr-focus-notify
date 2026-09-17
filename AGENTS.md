@@ -56,19 +56,20 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - The script name is a hash of the pane ID, so repeated events for one pane reuse the same script path. Old generated scripts and crashed notifier temp files are cleaned up opportunistically.
    - The script is made executable with mode `0o700`.
 6. **Notification delivery**:
-   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls `alerter`, then invokes the binary's internal `--focus-pane` action if the user clicks the notification. That action re-reads the current workspace binding, activates it with `open -b <bound bundle id>`, marks the operation as plugin-originated, and runs `herdr agent focus <pane>` followed by `herdr tab focus <tab_id>` with the returned tab ID to synchronize Herdr 0.9.0 client views. With no binding, the action exits without activating an app or invoking Herdr.
+   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls `alerter`, then invokes the binary's internal `--focus-pane` action if the user clicks the notification. That action re-reads the current workspace binding, activates it with `open -b <bound bundle id>`, marks the operation as plugin-originated, and sends Herdr's raw `pane.focus` socket request to display the target workspace, tab, and pane atomically. This works for both agent and ordinary shell panes. With no binding, the action exits without activating an app or invoking Herdr.
    - `--test` runs the generated script in the foreground so notifier failures surface through stderr and a non-zero exit code.
 
 ## Configuration
 
 The plugin is zero-config: as of 0.4.0 there is no `.env` file and no `HERDR_FOCUS_NOTIFY_*` variables. Notification statuses (`blocked`, `done`), the 3600-second auto-dismiss timeout, `alerter` auto-detection, per-workspace terminal activation, and the **Clear saved terminal bindings** action are built-in defaults.
 
-Two environment hooks remain for tests and unusual installs:
+Three environment hooks remain for tests and unusual installs:
 
 | Variable | Effect |
 |---|---|
 | `HERDR_BIN_PATH` | Explicit path to the `herdr` binary; takes precedence over `PATH` and the hard-coded candidates. |
 | `HERDR_PLUGIN_STATE_DIR` | Overrides the state directory, where generated scripts, `terminal-memory.json`, focus-origin markers, and cleanup markers live (falls back to `$TMPDIR/herdr-focus-notify`). |
+| `HERDR_SOCKET_PATH` | Herdr's injected local socket path, used by notification clicks to send an atomic `pane.focus` request. |
 
 Herdr itself also sets `HERDR_PLUGIN_EVENT_JSON` (event payload) and `HERDR_PLUGIN_EVENT` (event name) when invoking the plugin.
 

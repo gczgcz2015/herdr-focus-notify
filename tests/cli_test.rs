@@ -3,7 +3,11 @@ use std::process::Command;
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -366,46 +370,87 @@ fn write_state_frontmost(temp_dir: &Path) {
     );
 }
 
+/// A short `/tmp` socket path. The bound path must stay under `sun_path`'s
+/// ~104-byte limit, so it cannot live in the long per-test temp directory.
+#[cfg(unix)]
+fn unique_socket_path() -> PathBuf {
+    static NEXT_SOCKET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    PathBuf::from(format!(
+        "/tmp/herdr-focus-notify-{}-{}.sock",
+        std::process::id(),
+        NEXT_SOCKET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+#[cfg(unix)]
+fn focus_socket(expected_pane_id: &str, response: &str) -> (PathBuf, std::thread::JoinHandle<()>) {
+    let socket_path = unique_socket_path();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let cleanup_path = socket_path.clone();
+    let expected_pane_id = expected_pane_id.to_string();
+    let response = response.to_string();
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "plugin did not connect to the Herdr socket"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("failed to accept Herdr socket connection: {err}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+
+        let mut request_line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut request_line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request["id"], "herdr-focus-notify:focus");
+        assert_eq!(request["method"], "pane.focus");
+        assert_eq!(request["params"]["pane_id"], expected_pane_id);
+
+        writeln!(stream, "{response}").unwrap();
+        fs::remove_file(cleanup_path).unwrap();
+    });
+    (socket_path, handle)
+}
+
 #[cfg(unix)]
 #[test]
-fn focus_click_projects_the_selected_agents_actual_tab() {
+fn focus_click_targets_an_arbitrary_pane_through_the_socket_api() {
     let temp_dir = temp_test_dir();
-    let herdr = temp_dir.join("herdr");
-    let log = temp_dir.join("focus.log");
     let open_log = temp_dir.join("open.log");
     write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
     write_executable(
         &temp_dir.join("open"),
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\n",
     );
-    write_executable(
-        &herdr,
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "$HERDR_LOG"
-if [ "$1 $2" = "agent focus" ]; then
-  printf '%s\n' '{"result":{"agent":{"pane_id":"w2:p7","tab_id":"w2:t3","focused":true}}}'
-elif [ "$1 $2 $3" != "tab focus w2:t3" ]; then
-  exit 1
-fi
-"#,
+    let (socket_path, socket_handle) = focus_socket(
+        "w2:p7",
+        r#"{"id":"herdr-focus-notify:focus","result":{"type":"pane_info","pane":{"pane_id":"w2:p7","workspace_id":"w2"}}}"#,
     );
     let output = binary()
         .args(["--focus-pane", "w2:p7"])
-        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
-        .env("HERDR_LOG", &log)
         .env("OPEN_LOG", &open_log)
         .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
+    socket_handle.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(log).unwrap(),
-        "agent focus w2:p7\ntab focus w2:t3\n"
     );
     assert_eq!(
         fs::read_to_string(open_log).unwrap(),
@@ -416,53 +461,109 @@ fi
 
 #[cfg(unix)]
 #[test]
-fn focus_click_reports_failures_without_guessing_a_tab() {
+fn focus_click_reports_a_missing_plugin_socket() {
     let temp_dir = temp_test_dir();
-    let herdr = temp_dir.join("herdr");
-    let log = temp_dir.join("focus.log");
     write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
     write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
-    for (response, exit_code, expected) in [
-        ("{}", 1, "failed to focus agent"),
-        ("not json", 0, "invalid agent focus json"),
-        (r#"{"result":{"agent":{}}}"#, 0, "missing tab_id"),
-    ] {
-        write_executable(&herdr, &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HERDR_LOG\"\nprintf '%s\\n' '{response}'\nexit {exit_code}\n"));
-        let output = binary()
-            .args(["--focus-pane", "w2:p7"])
-            .env("HERDR_BIN_PATH", &herdr)
-            .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
-            .env("HERDR_LOG", &log)
-            .env("PATH", path_with_temp_dir(&temp_dir))
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
-        assert_eq!(fs::read_to_string(&log).unwrap(), "agent focus w2:p7\n");
-        assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
-    }
-    write_executable(
-        &herdr,
-        r#"#!/bin/sh
-if [ "$1" = "agent" ]; then
-  printf '%s\n' '{"result":{"agent":{"tab_id":"w2:t3"}}}'
-else
-  echo 'tab no longer exists' >&2
-  exit 1
-fi
-"#,
-    );
+
     let output = binary()
         .args(["--focus-pane", "w2:p7"])
-        .env("HERDR_BIN_PATH", &herdr)
+        .env_remove("HERDR_SOCKET_PATH")
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
+
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("failed to focus tab: tab no longer exists"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HERDR_SOCKET_PATH is unavailable"));
     assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn focus_click_reports_socket_api_failures() {
+    let temp_dir = temp_test_dir();
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
+    write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
+    for (response, expected) in [
+        (
+            r#"{"id":"herdr-focus-notify:focus","error":{"code":"not_found","message":"pane not found"}}"#,
+            "failed to focus pane: pane not found",
+        ),
+        ("not json", "invalid pane focus response"),
+        (
+            r#"{"id":"herdr-focus-notify:focus","result":{"type":"ok"}}"#,
+            "missing pane_info result",
+        ),
+    ] {
+        let (socket_path, socket_handle) = focus_socket("w2:p7", response);
+        let output = binary()
+            .args(["--focus-pane", "w2:p7"])
+            .env("HERDR_SOCKET_PATH", &socket_path)
+            .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
+            .env("PATH", path_with_temp_dir(&temp_dir))
+            .output()
+            .unwrap();
+        socket_handle.join().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
+    }
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn focus_click_reports_a_socket_that_never_answers() {
+    let temp_dir = temp_test_dir();
+    write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
+    write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
+
+    let socket_path = unique_socket_path();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_in_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        // Hold the connection open without answering: the client has to give up
+        // on its own read timeout, not on this side closing the socket. The
+        // bounded hold turns a missing timeout into a failed assertion instead
+        // of a test that hangs forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !stop_in_thread.load(std::sync::atomic::Ordering::Relaxed)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(stream);
+    });
+
+    let started = std::time::Instant::now();
+    let output = binary()
+        .args(["--focus-pane", "w2:p7"])
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
+        .env("PATH", path_with_temp_dir(&temp_dir))
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("timed out after 5s"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp_dir.join("state/focus-origin-w2.marker").exists());
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "client waited {elapsed:?}"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    handle.join().unwrap();
+    fs::remove_file(&socket_path).unwrap();
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
@@ -471,7 +572,7 @@ fi
 fn notification_content_click_runs_the_focus_helper() {
     let temp_dir = temp_test_dir();
     let herdr = temp_dir.join("herdr");
-    let log = temp_dir.join("click.log");
+    let notifier_log = temp_dir.join("notifier.log");
     let open_log = temp_dir.join("open.log");
     write_terminal_binding(&temp_dir.join("state"), "w2", "com.example.terminal");
     write_executable(
@@ -480,45 +581,46 @@ fn notification_content_click_runs_the_focus_helper() {
 case "$1 $2" in
   'pane list') echo '{"result":{"panes":[{"focused":true,"pane_id":"w2:p7"}]}}' ;;
   'agent get') echo '{"result":{"agent":{"focused":false,"pane_id":"w2:p7"}}}' ;;
-  'agent focus')
-    printf '%s\n' "$*" >> "$HERDR_LOG"
-    echo '{"result":{"agent":{"pane_id":"w2:p7","tab_id":"w2:t3"}}}' ;;
-  'tab focus') printf '%s\n' "$*" >> "$HERDR_LOG" ;;
   *) exit 1 ;;
 esac
 "#,
     );
     write_executable(
         &temp_dir.join("alerter"),
-        "#!/bin/sh\necho '@CONTENTCLICKED'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFIER_LOG\"\necho '@CONTENTCLICKED'\n",
     );
     write_executable(
         &temp_dir.join("open"),
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$OPEN_LOG\"\n",
     );
     write_executable(&temp_dir.join("lsappinfo"), "#!/bin/sh\nexit 1\n");
+    let (socket_path, socket_handle) = focus_socket(
+        "w2:p7",
+        r#"{"id":"herdr-focus-notify:focus","result":{"type":"pane_info","pane":{"pane_id":"w2:p7","workspace_id":"w2"}}}"#,
+    );
     let output = binary()
         .arg("--test")
         .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
-        .env("HERDR_LOG", &log)
+        .env("NOTIFIER_LOG", &notifier_log)
         .env("OPEN_LOG", &open_log)
         .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
+    socket_handle.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        fs::read_to_string(log).unwrap(),
-        "agent focus w2:p7\ntab focus w2:t3\n"
-    );
-    assert_eq!(
         fs::read_to_string(open_log).unwrap(),
         "-b com.example.terminal\n"
     );
+    let notifier_args = fs::read_to_string(notifier_log).unwrap();
+    assert!(notifier_args.contains("Focus notification test\n"));
+    assert!(notifier_args.contains("Click to return to this Herdr pane.\n"));
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
@@ -559,30 +661,24 @@ fn notification_focus_does_not_overwrite_existing_terminal_binding() {
     let temp_dir = temp_test_dir();
     let state_dir = temp_dir.join("state");
     let frontmost_state = temp_dir.join("frontmost");
-    let herdr = temp_dir.join("herdr");
     write_terminal_binding(&state_dir, "w1", "com.mitchellh.ghostty");
     fs::write(&frontmost_state, "com.example.notification-app\n").unwrap();
     write_state_frontmost(&temp_dir);
     write_executable(&temp_dir.join("open"), "#!/bin/sh\nexit 0\n");
-    write_executable(
-        &herdr,
-        r#"#!/bin/sh
-case "$1 $2" in
-  'agent focus') echo '{"result":{"agent":{"tab_id":"w1:t1"}}}' ;;
-  'tab focus') exit 0 ;;
-  *) exit 1 ;;
-esac
-"#,
+    let (socket_path, socket_handle) = focus_socket(
+        "w1:p2",
+        r#"{"id":"herdr-focus-notify:focus","result":{"type":"pane_info","pane":{"pane_id":"w1:p2","workspace_id":"w1"}}}"#,
     );
 
     let focus = binary()
         .args(["--focus-pane", "w1:p2"])
-        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
         .env("FRONTMOST_STATE", &frontmost_state)
         .env("PATH", path_with_temp_dir(&temp_dir))
         .output()
         .unwrap();
+    socket_handle.join().unwrap();
     assert!(
         focus.status.success(),
         "{}",
@@ -590,7 +686,6 @@ esac
     );
 
     let event = binary()
-        .env("HERDR_BIN_PATH", &herdr)
         .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
         .env("HERDR_PLUGIN_EVENT", "pane.focused")
         .env(
