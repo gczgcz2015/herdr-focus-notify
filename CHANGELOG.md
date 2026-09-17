@@ -2,6 +2,17 @@
 
 All notable changes to `herdr-focus-notify` are documented here.
 
+## [0.6.0] - 2026-09-17
+
+### Fixed
+
+- Clicking a notification now focuses any pane, including ordinary shell panes without a detected agent. The click helper sends Herdr's raw `pane.focus` socket request over the injected `HERDR_SOCKET_PATH` instead of running `herdr agent focus` followed by `herdr tab focus`, which Herdr rejected with `agent_not_found` for shell panes: the terminal became frontmost but Herdr stayed on the previous tab and pane.
+
+### Changed
+
+- The `pane.focus` response is validated (echoed request id, `pane_info` result type, returned pane id), and the socket read gives up after 5 seconds so a silent Herdr server cannot strand the detached click process or hang the `--test` action in the foreground. Focus-origin marker cleanup is unchanged on every error path.
+- The test notification copy is simplified to "Focus notification test / Click to return to this Herdr pane."
+
 ## [0.5.2] - 2026-09-17
 
 ### Fixed
