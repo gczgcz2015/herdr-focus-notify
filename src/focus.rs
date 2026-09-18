@@ -72,6 +72,12 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     crate::state::mark_focus_origin(workspace)
         .map_err(|err| format!("failed to mark notification focus: {err}"))?;
     let result = (|| -> Result<(), String> {
+        // Select the terminal container showing Herdr before activating the
+        // terminal, so it brings that container forward. Terminals without an
+        // adapter, or any failure, keep plain app activation.
+        if let Ok(socket_path) = env::var("HERDR_SOCKET_PATH") {
+            let _ = crate::terminal::raise_client_container(&bound_terminal, &socket_path);
+        }
         activate_terminal(&bound_terminal)?;
         focus_pane_via_socket(pane_id)
     })();

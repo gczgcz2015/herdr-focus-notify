@@ -7,6 +7,7 @@ mod notification;
 mod notifier;
 mod script;
 mod state;
+mod terminal;
 mod util;
 
 use std::env;

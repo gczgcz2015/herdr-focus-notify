@@ -65,6 +65,16 @@ By default, `blocked` and `done` status changes can produce a notification. The 
 
 Clicking a notification with a saved terminal binding activates that terminal, then sends Herdr's `pane.focus` socket request for the notification's pane. This atomically displays the matching workspace, tab, and pane, including ordinary shell panes without a detected agent. When multiple clients share a server, it switches all of them to that pane. If the workspace has no binding, the click does not activate an app or issue a Herdr focus request; focus the pane manually once in the terminal to establish the binding.
 
+With several kitty windows or tabs, activating kitty alone may bring forward one that is not running Herdr. When kitty remote control is enabled, a click first selects the kitty window of a Herdr client attached to that session, so kitty raises that window together with its tab and OS window:
+
+```conf
+# kitty.conf (restart kitty afterwards)
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+Without these settings, or for other terminals, the click activates the terminal as before.
+
 Blocked notifications say that the agent needs your input and prompt you to review and respond. Done notifications say that the agent finished and prompt you to review the result. The plugin does not read or summarize pane contents.
 
 When you manually focus the matching pane in Herdr while its terminal is frontmost, its pending notification is removed.

@@ -65,6 +65,16 @@ brew install vjeantet/tap/alerter
 
 点击通知后,如果该 workspace 已有终端绑定,插件会激活该终端,然后通过 Herdr socket 发送目标 pane 的 `pane.focus` 请求。该请求会一次性显示对应的 workspace、tab 和 pane，也支持没有检测到 agent 的普通 shell pane。多个客户端连接同一服务端时,会一起切换到该 pane。如果 workspace 没有绑定,点击不会激活 App,也不会发送 Herdr focus 请求；请先在预期终端中手动聚焦一次 pane。
 
+kitty 开了多个 window 或 tab 时，只激活 kitty 可能会把没有运行 Herdr 的那个窗口带到前面。开启 kitty 远程控制后，点击会先选中该 session 的 Herdr 客户端所在的 kitty window，kitty 会连同它所在的 tab 和 OS window 一起带到前面：
+
+```conf
+# kitty.conf（修改后需重启 kitty）
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+未开启这些设置，或使用其它终端时，点击仍按原方式激活终端。
+
 `blocked` 通知会提示 Agent 需要你的输入，并引导你查看和回复；`done` 通知会提示 Agent 已完成，并引导你查看结果。插件不会读取或总结 pane 内容。
 
 终端 App 在前台时，你在 Herdr 中手动聚焦对应 pane 后，待处理通知会被移除。如果通知到达时 pane 已经是 active，切回该终端 App 后，通知会在数秒内移除。
