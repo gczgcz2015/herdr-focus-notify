@@ -1,3 +1,15 @@
+use std::process::Command;
+
+/// Runs a command and returns its stdout on success. None when the binary is
+/// missing, the command fails, or the output is not valid UTF-8.
+pub(crate) fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(bin).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
 pub(crate) fn sanitize_group_id(value: &str) -> String {
     value
         .chars()

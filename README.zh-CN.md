@@ -65,6 +65,23 @@ brew install vjeantet/tap/alerter
 
 点击通知后,如果该 workspace 已有终端绑定,插件会激活该终端,然后通过 Herdr socket 发送目标 pane 的 `pane.focus` 请求。该请求会一次性显示对应的 workspace、tab 和 pane，也支持没有检测到 agent 的普通 shell pane。多个客户端连接同一服务端时,会一起切换到该 pane。如果 workspace 没有绑定,点击不会激活 App,也不会发送 Herdr focus 请求；请先在预期终端中手动聚焦一次 pane。
 
+### 多个终端 window 和 tab
+
+终端开了多个 window 或 tab 时，只激活终端 App 可能会把没有运行 Herdr 的那个窗口带到前面。在受支持的终端中，点击会先选中该 session 的 Herdr 客户端所在的 window、tab 或分屏，再连同它所在的 OS window 一起带到前面。连接了多个客户端时，优先选择最近使用的那个。
+
+| 终端 | 配置 |
+|---|---|
+| iTerm2 | 无需配置。插件会把客户端的 `ITERM_SESSION_ID` 交给 iTerm2 内置的 reveal URL。 |
+| kitty | 需要开启远程控制，见下方配置。 |
+
+```conf
+# kitty.conf（修改后需重启 kitty）
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+其他终端，或未开启上述设置的 kitty，点击只会激活终端 App，具体带到前面的是哪个窗口由 macOS 决定。
+
 `blocked` 通知会提示 Agent 需要你的输入，并引导你查看和回复；`done` 通知会提示 Agent 已完成，并引导你查看结果。插件不会读取或总结 pane 内容。
 
 终端 App 在前台时，你在 Herdr 中手动聚焦对应 pane 后，待处理通知会被移除。如果通知到达时 pane 已经是 active，切回该终端 App 后，通知会在数秒内移除。
@@ -82,6 +99,7 @@ brew install vjeantet/tap/alerter
 | 问题 | 检查方式 |
 |---|---|
 | 没有收到通知 | 确认 `alerter` 已安装且可执行;插件从 `PATH` 和常见 Homebrew 路径自动查找(`brew install vjeantet/tap/alerter`)。 |
+| 激活了正确的终端，但不是运行 Herdr 的那个 window 或 tab | 只有 iTerm2 和开启远程控制的 kitty 支持选中 window 和 tab（见[多个终端 window 和 tab](#多个终端-window-和-tab)），其他终端只会激活 App。 |
 | 点击后没有激活预期终端 | 使用插件的“清除已保存终端绑定” action,然后在预期终端中手动聚焦一次 pane。 |
 | workspace 保存了错误的终端绑定 | 使用插件的“清除已保存终端绑定” action,然后在预期终端中手动聚焦一次 pane。 |
 | 正在看 Herdr 时仍收到通知 | 说明那一刻你不在该 workspace 绑定的终端里;插件优先保证不错过状态变化。 |

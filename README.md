@@ -65,6 +65,23 @@ By default, `blocked` and `done` status changes can produce a notification. The 
 
 Clicking a notification with a saved terminal binding activates that terminal, then sends Herdr's `pane.focus` socket request for the notification's pane. This atomically displays the matching workspace, tab, and pane, including ordinary shell panes without a detected agent. When multiple clients share a server, it switches all of them to that pane. If the workspace has no binding, the click does not activate an app or issue a Herdr focus request; focus the pane manually once in the terminal to establish the binding.
 
+### Multiple terminal windows and tabs
+
+With several windows or tabs open, activating the terminal app alone may bring forward one that is not running Herdr. In supported terminals, a click first selects the window, tab, or split running a Herdr client attached to that session, and raises it together with its OS window. When several clients are attached, the most recently used one is chosen.
+
+| Terminal | Setup |
+|---|---|
+| iTerm2 | None. The plugin passes the client's `ITERM_SESSION_ID` to iTerm2's built-in reveal URL. |
+| kitty | Enable remote control, as shown below. |
+
+```conf
+# kitty.conf (restart kitty afterwards)
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+In other terminals, or in kitty without these settings, the click only activates the terminal app, and macOS decides which window comes forward.
+
 Blocked notifications say that the agent needs your input and prompt you to review and respond. Done notifications say that the agent finished and prompt you to review the result. The plugin does not read or summarize pane contents.
 
 When you manually focus the matching pane in Herdr while its terminal is frontmost, its pending notification is removed.
@@ -84,6 +101,7 @@ The `--test` action sends a real test notification (capped at 10 seconds) so you
 | Problem | What to check |
 |---|---|
 | No notification appears | Make sure `alerter` is installed and executable; it is auto-detected from `PATH` and common Homebrew locations (`brew install vjeantet/tap/alerter`). |
+| Click brings the right terminal forward, but not the window or tab running Herdr | Window and tab selection works only in iTerm2 and in kitty with remote control enabled (see [Multiple terminal windows and tabs](#multiple-terminal-windows-and-tabs)). Other terminals only get app-level activation. |
 | Click does not bring forward the expected terminal | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
 | A workspace has a stale terminal binding | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
 | Notifications appear while you are viewing Herdr | You were not in the workspace's bound terminal at that moment; the plugin errs on the side of notifying rather than missing a state change. |
