@@ -4,17 +4,18 @@
 use std::env;
 use std::ffi::{c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
+
+use crate::util::command_stdout;
 
 /// A Herdr client process attached to the session.
 ///
-/// Terminals identify a container either through a variable they inject into
-/// the environment (kitty's `KITTY_WINDOW_ID`) or through its controlling tty
-/// (the `tty` of an iTerm2 or Terminal.app session). Only the environment is
-/// carried until an adapter needs the tty.
-#[derive(Debug, Default)]
+/// Terminals identify a container through variables they inject into the
+/// environment, such as kitty's `KITTY_WINDOW_ID` or iTerm2's
+/// `ITERM_SESSION_ID`.
+#[derive(Debug)]
 pub(crate) struct HerdrClient {
+    pub(crate) pid: u32,
     pub(crate) environment: Vec<(String, String)>,
 }
 
@@ -27,10 +28,20 @@ impl HerdrClient {
             .map(|(_, value)| value.as_str())
             .filter(|value| !value.is_empty())
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: &[(&str, &str)]) -> Self {
+        Self {
+            pid: 0,
+            environment: pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
 }
 
-/// The clients of the session behind `herdr_socket_path`, most recently used
-/// first.
+/// The clients of the session behind `herdr_socket_path`.
 pub(crate) fn herdr_clients(herdr_socket_path: &str) -> Result<Vec<HerdrClient>, String> {
     let client_socket = client_socket_path(
         Path::new(herdr_socket_path),
@@ -41,19 +52,19 @@ pub(crate) fn herdr_clients(herdr_socket_path: &str) -> Result<Vec<HerdrClient>,
     let lsof = command_stdout("lsof", &["-a", "-U", "-c", "herdr", "-F", "pdn"])
         .ok_or("failed to list Herdr client sockets")?;
 
-    let mut clients: Vec<(Option<SystemTime>, HerdrClient)> =
-        client_pids_from_lsof(&lsof, &client_socket)
-            .into_iter()
-            .map(|pid| {
-                let last_input = controlling_tty(pid).and_then(|tty| tty_last_input(&tty));
-                let client = HerdrClient {
-                    environment: process_environment(pid).unwrap_or_default(),
-                };
-                (last_input, client)
-            })
-            .collect();
-    clients.sort_by_key(|(last_input, _)| std::cmp::Reverse(*last_input));
-    Ok(clients.into_iter().map(|(_, client)| client).collect())
+    Ok(client_pids_from_lsof(&lsof, &client_socket)
+        .into_iter()
+        .map(|pid| HerdrClient {
+            pid,
+            environment: process_environment(pid).unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// When the client's terminal last received input, used to prefer the most
+/// recently used client.
+pub(crate) fn last_input(pid: u32) -> Option<SystemTime> {
+    controlling_tty(pid).and_then(|tty| tty_last_input(&tty))
 }
 
 /// The socket Herdr clients of this session connect to.
@@ -120,14 +131,6 @@ fn tty_last_input(tty: &str) -> Option<SystemTime> {
     std::fs::metadata(Path::new("/dev").join(tty))
         .and_then(|meta| meta.accessed())
         .ok()
-}
-
-fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(bin).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
 }
 
 extern "C" {
@@ -320,12 +323,7 @@ n->0xother
 
     #[test]
     fn reads_non_empty_client_environment_variables() {
-        let client = HerdrClient {
-            environment: vec![
-                ("SET".to_string(), "value".to_string()),
-                ("EMPTY".to_string(), String::new()),
-            ],
-        };
+        let client = HerdrClient::from_pairs(&[("SET", "value"), ("EMPTY", "")]);
         assert_eq!(client.env("SET"), Some("value"));
         assert_eq!(client.env("EMPTY"), None);
         assert_eq!(client.env("MISSING"), None);

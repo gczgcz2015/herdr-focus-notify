@@ -27,16 +27,10 @@ impl TerminalAdapter for Kitty {
             .parent()?
             .parent()?
             .join("MacOS/kitten");
+        let target = format!("id:{window_id}");
         Some(FocusCommand::new(
             kitten,
-            [
-                "@".to_string(),
-                "--to".to_string(),
-                listen_on.to_string(),
-                "focus-window".to_string(),
-                "--match".to_string(),
-                format!("id:{window_id}"),
-            ],
+            ["@", "--to", listen_on, "focus-window", "--match", &target],
         ))
     }
 }
@@ -51,12 +45,7 @@ mod tests {
     );
 
     fn client(pairs: &[(&str, &str)]) -> HerdrClient {
-        HerdrClient {
-            environment: pairs
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect(),
-        }
+        HerdrClient::from_pairs(pairs)
     }
 
     #[test]

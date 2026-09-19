@@ -7,6 +7,7 @@ All notable changes to `herdr-focus-notify` are documented here.
 ### Added
 
 - In kitty, a notification click raises the kitty window running a Herdr client for that session, including its tab and OS window, instead of whichever kitty window macOS brings forward. The client is found through its connection to the session's client socket (`HERDR_CLIENT_SOCKET_PATH`, or the API socket's name with `-client.sock`, such as `herdr-client.sock`), and its `KITTY_WINDOW_ID` and `KITTY_LISTEN_ON` are read from the client process. This needs kitty remote control (`allow_remote_control` and `listen_on`); without it, or in other terminals, the click activates the bound terminal as before.
+- In iTerm2, a notification click selects the session running a Herdr client for that session, including its tab and window, through iTerm2's built-in `iterm2:reveal?sessionid=` URL with the client's `ITERM_SESSION_ID`. No iTerm2 setup is needed. Clients that belong to another terminal but inherited `ITERM_SESSION_ID` (a `KITTY_WINDOW_ID`, or a `TERM_PROGRAM` other than `iTerm.app`) are skipped.
 
 ## [0.6.0] - 2026-09-17
 

@@ -13,8 +13,10 @@
 //! the caller's app-level activation unchanged.
 
 mod client;
+mod iterm2;
 mod kitty;
 
+use std::cmp::Reverse;
 use std::ffi::OsString;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -55,7 +57,7 @@ impl FocusCommand {
     }
 }
 
-const ADAPTERS: &[&dyn TerminalAdapter] = &[&kitty::Kitty];
+const ADAPTERS: &[&dyn TerminalAdapter] = &[&iterm2::Iterm2, &kitty::Kitty];
 
 /// How long a focus command may take. A terminal that asks the user to confirm
 /// a control request would otherwise block the click indefinitely.
@@ -77,18 +79,15 @@ pub(crate) fn raise_client_container(
 ) -> Result<(), String> {
     let adapter = adapter_for(bound_terminal)
         .ok_or_else(|| format!("no terminal adapter for {bound_terminal}"))?;
-    let commands: Vec<FocusCommand> = client::herdr_clients(herdr_socket_path)?
+    let mut commands: Vec<(u32, FocusCommand)> = client::herdr_clients(herdr_socket_path)?
         .iter()
-        .filter_map(|client| adapter.focus_command(client))
+        .filter_map(|client| Some((client.pid, adapter.focus_command(client)?)))
         .collect();
-    if commands.is_empty() {
-        return Err(format!(
-            "no Herdr client with a controllable {bound_terminal} container"
-        ));
-    }
+    // Only clients the adapter can control need their tty looked up.
+    commands.sort_by_cached_key(|(pid, _)| Reverse(client::last_input(*pid)));
 
-    let mut last_error = String::new();
-    for command in &commands {
+    let mut last_error = format!("no Herdr client with a controllable {bound_terminal} container");
+    for (_, command) in &commands {
         match run_focus_command(command) {
             Ok(()) => return Ok(()),
             Err(err) => last_error = err,
@@ -129,6 +128,10 @@ mod tests {
 
     #[test]
     fn finds_adapters_by_bundle_id() {
+        assert_eq!(
+            adapter_for("com.googlecode.iterm2").map(|adapter| adapter.bundle_id()),
+            Some("com.googlecode.iterm2")
+        );
         assert_eq!(
             adapter_for("net.kovidgoyal.kitty").map(|adapter| adapter.bundle_id()),
             Some("net.kovidgoyal.kitty")

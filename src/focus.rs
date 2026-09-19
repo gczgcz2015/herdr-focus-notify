@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::notification::FocusNotification;
-use crate::util::sanitize_group_id;
+use crate::util::{command_stdout, sanitize_group_id};
 
 /// How long a notification click waits for Herdr's pane focus response. A real
 /// click runs detached, where an unanswered request would leave a stray process
@@ -75,11 +75,13 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
         // Select the terminal container showing Herdr before activating the
         // terminal, so it brings that container forward. Terminals without an
         // adapter, or any failure, keep plain app activation.
-        if let Ok(socket_path) = env::var("HERDR_SOCKET_PATH") {
-            let _ = crate::terminal::raise_client_container(&bound_terminal, &socket_path);
+        let socket_path = env::var("HERDR_SOCKET_PATH").ok();
+        if let Some(socket_path) = &socket_path {
+            let _ = crate::terminal::raise_client_container(&bound_terminal, socket_path);
         }
         activate_terminal(&bound_terminal)?;
-        focus_pane_via_socket(pane_id)
+        let socket_path = socket_path.ok_or("HERDR_SOCKET_PATH is unavailable")?;
+        focus_pane_via_socket(pane_id, &socket_path)
     })();
 
     if result.is_err() {
@@ -89,10 +91,8 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     result
 }
 
-fn focus_pane_via_socket(pane_id: &str) -> Result<(), String> {
-    let socket_path = env::var("HERDR_SOCKET_PATH")
-        .map_err(|_| "HERDR_SOCKET_PATH is unavailable".to_string())?;
-    let mut stream = UnixStream::connect(&socket_path)
+fn focus_pane_via_socket(pane_id: &str, socket_path: &str) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| format!("failed to connect to Herdr socket {socket_path}: {err}"))?;
     stream
         .set_read_timeout(Some(FOCUS_SOCKET_TIMEOUT))
@@ -232,16 +232,6 @@ fn pane_is_focused(pane_id: &str, herdr_bin: &str) -> bool {
         .ok()
         .flatten()
         .unwrap_or(false)
-}
-
-/// Runs a command and returns its stdout on success. None when the binary is
-/// missing, the command fails, or the output is not valid UTF-8.
-fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(bin).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
 }
 
 /// The bundle identifier of the frontmost macOS app, or None when it cannot be
