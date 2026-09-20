@@ -63,7 +63,7 @@ fn set_action(action: &mut CliAction, next: CliAction, arg: &str) -> Result<(), 
 
 pub(crate) fn print_usage() {
     println!(
-        "herdr-focus-notify {}\n\nUsage:\n  herdr-focus-notify\n  herdr-focus-notify --test\n  herdr-focus-notify --cleanup\n  herdr-focus-notify --clear-terminal-bindings\n\nOptions:\n  --test                    Send a test focus notification\n  --cleanup                 Remove stale generated state files\n  --clear-terminal-bindings Remove all saved workspace-terminal bindings\n  -h, --help                Show this help\n  -V, --version\n                            Show the version",
+        "herdr-focus-notify {}\n\nUsage:\n  herdr-focus-notify\n  herdr-focus-notify --test\n  herdr-focus-notify --cleanup\n  herdr-focus-notify --clear-terminal-bindings\n  herdr-focus-notify --check-pane-visibility <pane_id>\n\nOptions:\n  --test                    Send a test focus notification\n  --cleanup                 Remove stale generated state files\n  --clear-terminal-bindings Remove all saved workspace-terminal bindings\n  --check-pane-visibility <pane_id>\n                            Check whether a pane is visible in its workspace's bound terminal\n  -h, --help                Show this help\n  -V, --version\n                            Show the version",
         env!("CARGO_PKG_VERSION")
     );
 }

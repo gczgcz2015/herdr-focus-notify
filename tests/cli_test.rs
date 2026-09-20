@@ -21,7 +21,11 @@ fn binary() -> Command {
 fn help_and_version_print_to_stdout() {
     let help = binary().arg("--help").output().unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage:"));
+    let help_stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(help_stdout.contains("Usage:"));
+    // The troubleshooting docs point users at the diagnostic flag, so --help
+    // must list it too.
+    assert!(help_stdout.contains("--check-pane-visibility <pane_id>"));
     assert!(help.stderr.is_empty());
 
     let version = binary().arg("--version").output().unwrap();
